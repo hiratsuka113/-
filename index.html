@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Radial Delay (center -> edge)</title>
+  <title>Radial Delay (Curved Increase)</title>
   <style>
     html, body { margin:0; height:100%; background:#000; overflow:hidden; }
     canvas { width:100%; height:100%; display:block; }
@@ -15,30 +15,35 @@
       border-radius: 12px; line-height:1.35; user-select:none;
     }
     label{ display:block; font-size:12px; opacity:0.9; margin-top:8px; }
-    input[type="range"]{ width:280px; }
-    .small{ font-size:12px; opacity:0.75; margin-top:6px; }
+    input[type="range"]{ width:300px; }
+    .small{ font-size:12px; opacity:0.75; margin-top:6px; max-width: 340px; }
   </style>
 </head>
 <body>
   <canvas id="cv"></canvas>
 
   <div class="ui">
-    <div>中心遅延: <b><span id="cval">0</span></b> ms</div>
-    <div>外側遅延: <b><span id="eval">900</span></b> ms</div>
-    <div>リング数: <b><span id="rval">8</span></b></div>
+    <div>中心遅延: <b><span id="cval">0</span></b> ms（ほぼ0固定）</div>
+    <div>外側遅延: <b><span id="eval">1200</span></b> ms</div>
+    <div>リング数: <b><span id="rval">10</span></b></div>
+    <div>カーブ強さ: <b><span id="pval">2.2</span></b></div>
 
-    <label>中心遅延 (ms)
-      <input id="centerDelay" type="range" min="0" max="1000" value="0">
-    </label>
     <label>外側遅延 (ms)
-      <input id="edgeDelay" type="range" min="0" max="3000" value="900">
+      <input id="edgeDelay" type="range" min="0" max="3000" value="1200">
     </label>
+
     <label>リング数（増やすほど重い）
-      <input id="rings" type="range" min="2" max="20" value="8">
+      <input id="rings" type="range" min="2" max="24" value="10">
+    </label>
+
+    <label>カーブ強さ（外側で急増） 1.0=直線
+      <input id="power" type="range" min="10" max="60" value="22">
+      <!-- 10..60 を 1.0..6.0 にマッピング -->
     </label>
 
     <div class="small">
-      ※ まず「中心0 / 外側800〜1500 / リング6〜10」くらいで試すのがおすすめ
+      おすすめ：外側800〜1500ms、リング8〜14、カーブ2〜4。<br>
+      ※外側2000ms超えは酔いやすいので注意。
     </div>
   </div>
 
@@ -48,21 +53,30 @@
   const ctx = cv.getContext('2d', { alpha:false });
 
   // UI
-  const centerDelayEl = document.getElementById('centerDelay');
-  const edgeDelayEl   = document.getElementById('edgeDelay');
-  const ringsEl       = document.getElementById('rings');
+  const edgeDelayEl = document.getElementById('edgeDelay');
+  const ringsEl = document.getElementById('rings');
+  const powerEl = document.getElementById('power');
+
   const cval = document.getElementById('cval');
   const evalEl = document.getElementById('eval');
   const rval = document.getElementById('rval');
+  const pval = document.getElementById('pval');
 
+  // 中心遅延は「ほぼ0」に固定（必要なら 0〜50ms くらいにしてもOK）
+  const centerDelayMs = 0;
+  cval.textContent = String(centerDelayMs);
+
+  function powerValue(){
+    return Number(powerEl.value) / 10; // 1.0..6.0
+  }
   function syncUI(){
-    cval.textContent = centerDelayEl.value;
     evalEl.textContent = edgeDelayEl.value;
     rval.textContent = ringsEl.value;
+    pval.textContent = powerValue().toFixed(1);
   }
-  centerDelayEl.addEventListener('input', syncUI);
   edgeDelayEl.addEventListener('input', syncUI);
   ringsEl.addEventListener('input', syncUI);
+  powerEl.addEventListener('input', syncUI);
   syncUI();
 
   // Canvas解像度
@@ -70,7 +84,6 @@
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     cv.width  = Math.floor(innerWidth * dpr);
     cv.height = Math.floor(innerHeight * dpr);
-    // オフスクリーンも追従
     maskCanvas.width = cv.width;
     maskCanvas.height = cv.height;
   }
@@ -87,12 +100,11 @@
   video.srcObject = stream;
   await video.play();
 
-  // フレームキュー（遅延表示用）
+  // フレームキュー（遅延用）
   const queue = []; // { t, img: ImageBitmap }
-  const maxHoldMs = 7000; // 外側遅延を大きくする場合に備えて長め
+  const maxHoldMs = 8000; // 外側遅延が大きいのに備えて長め
 
   async function captureFrame(){
-    // 取りすぎると重いので、必要なら「数フレームに1回」にしてもOK
     const bmp = await createImageBitmap(video);
     queue.push({ t: performance.now(), img: bmp });
 
@@ -103,18 +115,15 @@
     }
   }
 
-  // targetTime（now-delay）に最も近いフレームを返す
-  // 末尾から探すと速い（最近の方が使われやすい）
   function getFrameAtTime(targetTime){
     if (!queue.length) return null;
     for (let i = queue.length - 1; i >= 0; i--) {
       if (queue[i].t <= targetTime) return queue[i].img;
     }
-    // それでも見つからなければ最古
-    return queue[0].img;
+    return queue[0].img; // 最古
   }
 
-  // リング用マスクを作って合成するためのオフスクリーン
+  // リングマスク用オフスクリーン
   const maskCanvas = document.createElement('canvas');
   const mctx = maskCanvas.getContext('2d');
 
@@ -123,12 +132,14 @@
   function drawRingMask(cx, cy, rInner, rOuter){
     const w = cv.width, h = cv.height;
     mctx.clearRect(0,0,w,h);
-    mctx.fillStyle = "#fff";
+
     // 外円
+    mctx.fillStyle = "#fff";
     mctx.beginPath();
     mctx.arc(cx, cy, rOuter, 0, Math.PI * 2);
     mctx.closePath();
     mctx.fill();
+
     // 内円をくり抜く
     mctx.globalCompositeOperation = "destination-out";
     mctx.beginPath();
@@ -138,20 +149,20 @@
     mctx.globalCompositeOperation = "source-over";
   }
 
-  function drawMaskedFrame(frame, mask){
-    // いま描いたものにマスク適用するのではなく、
-    // “フレームを描いた後に destination-in でマスク”の方が楽。
+  function drawMaskedFrame(frame){
     const w = cv.width, h = cv.height;
-
-    // 一旦フレームを描く（全画面）
+    // フレームを全画面に描く
     ctx.drawImage(frame, 0, 0, w, h);
-
-    // マスクで切り抜き（リング部分だけ残す）
+    // リングマスクで切り抜く
     ctx.globalCompositeOperation = "destination-in";
-    ctx.drawImage(mask, 0, 0, w, h);
-
-    // 次の合成に備えて戻す
+    ctx.drawImage(maskCanvas, 0, 0, w, h);
     ctx.globalCompositeOperation = "source-over";
+  }
+
+  // 0..1 を曲線に（外側ほど急増）: u^p
+  function curved(u, p){
+    u = Math.max(0, Math.min(1, u));
+    return Math.pow(u, p);
   }
 
   async function loop(){
@@ -161,41 +172,33 @@
     const w = cv.width, h = cv.height;
     const cx = w / 2, cy = h / 2;
 
-    let centerDelay = Number(centerDelayEl.value);
-    let edgeDelay = Number(edgeDelayEl.value);
-    if (centerDelay > edgeDelay) [centerDelay, edgeDelay] = [edgeDelay, centerDelay];
-
+    const edgeDelayMs = Number(edgeDelayEl.value);
     const rings = Number(ringsEl.value);
+    const p = powerValue();
 
-    // 画面の最大半径（角まで届く）
     const maxR = Math.hypot(cx, cy);
 
-    // ベースを黒でクリア
+    // クリア
     ctx.fillStyle = "#000";
     ctx.fillRect(0,0,w,h);
 
-    // 内側→外側へリングを重ね描き
+    // 内→外へ描画
     for (let i = 0; i < rings; i++) {
-      const t0 = i / rings;
-      const t1 = (i + 1) / rings;
+      const u0 = i / rings;
+      const u1 = (i + 1) / rings;
 
-      const rInner = maxR * t0;
-      const rOuter = maxR * t1;
+      const rInner = maxR * u0;
+      const rOuter = maxR * u1;
 
-      // 外側ほど遅延が大きい
-      const delayMs = centerDelay + (edgeDelay - centerDelay) * t1;
-      const targetTime = now - delayMs;
+      // 遅延は「リングの外側位置 u1」を使って決める
+      const k = curved(u1, p); // 0..1（外ほど増える）
+      const delayMs = centerDelayMs + (edgeDelayMs - centerDelayMs) * k;
 
-      const frame = getFrameAtTime(targetTime);
+      const frame = getFrameAtTime(now - delayMs);
       if (!frame) continue;
 
-      // リングマスク生成 → そのリングだけフレームを表示
       drawRingMask(cx, cy, rInner, rOuter);
-
-      // そのリング部分を描く（上に重ねる）
-      ctx.save();
-      drawMaskedFrame(frame, maskCanvas);
-      ctx.restore();
+      drawMaskedFrame(frame);
     }
 
     requestAnimationFrame(() => loop().catch(console.error));
@@ -206,6 +209,7 @@
 </script>
 </body>
 </html>
+
 
 
 
